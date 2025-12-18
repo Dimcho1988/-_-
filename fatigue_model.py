@@ -127,5 +127,61 @@ def fatigue_index_series(seg_df: pd.DataFrame, poly: np.poly1d, speed_real_col: 
         "delta_v": delta,
         "fatigue_index": fi,
     })
+    def global_zone_points_all_activities(
+    seg_all: pd.DataFrame,
+    assign_speed_zones_fn,
+    V_crit: float,
+    speed_col: str,
+    hr_col: str,
+    mode: str = "B",   # "A" paired, "B" count-sorted
+) -> pd.DataFrame:
+    """
+    Строи глобални точки по зони от ВСИЧКИ активности:
+      - за всяка активност: зоните се правят по speed_col (чрез assign_speed_zones_fn)
+      - после:
+         mode="A" -> zone_points_paired
+         mode="B" -> zone_points_count_sorted
+    Връща DataFrame с редове: activity, zone, mean_speed, mean_hr, n
+    """
+    rows = []
+    for act, g in seg_all.groupby("activity"):
+        g = g.copy()
+        g_z = assign_speed_zones_fn(g, V_crit, speed_col=speed_col)
+
+        # пазим само валидни зони
+        g_z = g_z.dropna(subset=["zone"]).copy()
+        if g_z.empty:
+            continue
+
+        if mode.upper() == "A":
+            zp = zone_points_paired(g_z, speed_col=speed_col, hr_col=hr_col)
+        else:
+            # count-sorted иска seg_df (оригиналните сегменти) + seg_zones (зонираните)
+            zp = zone_points_count_sorted(seg_df=g, seg_zones=g_z, speed_col=speed_col, hr_col=hr_col)
+
+        zp["activity"] = act
+        rows.append(zp)
+
+    if not rows:
+        return pd.DataFrame(columns=["activity", "zone", "mean_speed", "mean_hr", "n"])
+
+    out = pd.concat(rows, ignore_index=True)
+    return out
+
+
+def fit_v_of_hr_global(zone_points_all: pd.DataFrame, deg: int = 1):
+    """
+    Фитва V=f(HR) от pooled точки от всички активности (всички зони, всички активности).
+    Връща poly и df_fit (изчистените точки).
+    """
+    df = zone_points_all.copy()
+    df = df.dropna(subset=["mean_speed", "mean_hr"])
+    if len(df) <= deg:
+        return None, df
+    x = df["mean_hr"].to_numpy(dtype=float)
+    y = df["mean_speed"].to_numpy(dtype=float)
+    coeffs = np.polyfit(x, y, deg)
+    return np.poly1d(coeffs), df
+
 
     return out
