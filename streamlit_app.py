@@ -655,6 +655,52 @@ seg_slope_cs["hr_aligned"] = seg_slope_cs["hr_aligned"]
 # CS diagnostics
 dv_ref, tau_ref_now, t90_now = predict_t90_for_reference(CS, ref_percent, tau_min, k_par, q_par)
 st.caption(f"CS модел: Δv_ref={dv_ref:.2f} km/h, τ_ref≈{tau_ref_now:.1f} s, t90≈{t90_now:.0f} s при {ref_percent:.1f}% от CS.")
+st.subheader("Обобщение по активности (средни скорости + среден пулс)")
+
+# какъв пулс да обобщаваме (същия, който ползваш за моделите/таблиците)
+hr_summary_col = hr_col_used  # "hr_aligned" или "hr_mean"
+
+summary_cols_needed = ["activity", "dt_s", "v_kmh", "v_glide", "v_flat_eq", "v_flat_eq_cs", hr_summary_col]
+miss = [c for c in summary_cols_needed if c not in seg_slope_cs.columns]
+
+if miss:
+    st.warning(f"Липсват колони за summary таблицата: {miss}")
+else:
+    df_sum = seg_slope_cs.copy()
+
+    # по избор: изключи speed_spike ако искаш
+    if "speed_spike" in df_sum.columns:
+        df_sum = df_sum[~df_sum["speed_spike"].fillna(False)].copy()
+
+    # по избор: филтър за спирания (примерно под 2 km/h)
+    min_speed_summary = st.slider("Филтър за обобщение: минимална реална скорост [km/h]", 0.0, 5.0, 0.0, 0.5)
+    if min_speed_summary > 0:
+        df_sum = df_sum[df_sum["v_kmh"] >= min_speed_summary].copy()
+
+    df_activity_summary = (
+        df_sum.groupby("activity", as_index=False)
+        .agg(
+            duration_s=("dt_s", "sum"),
+            V_real_mean=("v_kmh", "mean"),
+            V_mod1_glide_mean=("v_glide", "mean"),
+            V_mod2_slope_mean=("v_flat_eq", "mean"),
+            V_mod3_cs_mean=("v_flat_eq_cs", "mean"),
+            HR_mean=(hr_summary_col, "mean"),
+        )
+    )
+
+    df_activity_summary["duration_h"] = df_activity_summary["duration_s"] / 3600.0
+    df_activity_summary = df_activity_summary.drop(columns=["duration_s"])
+    df_activity_summary = df_activity_summary.sort_values("activity").reset_index(drop=True)
+
+    st.dataframe(df_activity_summary, use_container_width=True, height=360)
+
+    st.download_button(
+        "Свали summary CSV",
+        data=df_activity_summary.to_csv(index=False).encode("utf-8"),
+        file_name="activity_summary.csv",
+        mime="text/csv",
+    )
 
 # ---------------------------------------------------------
 # Charts for glide/slope (optional)
