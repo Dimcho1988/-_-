@@ -741,6 +741,39 @@ act_list = sorted(seg_slope_cs["activity"].unique())
 act_selected = st.selectbox("Избери активност:", act_list)
 
 g_act = seg_slope_cs[seg_slope_cs["activity"] == act_selected].copy()
+st.subheader("Динамика на скоростите (4 линии) за избраната активност")
+
+needed_cols = ["time_s", "v_kmh", "v_glide", "v_flat_eq", "v_flat_eq_cs"]
+missing = [c for c in needed_cols if c not in g_act.columns]
+
+if missing:
+    st.warning(f"Липсват колони за графиката: {missing}. Провери дали се пренасят през pipeline-а.")
+else:
+    df_speed = g_act[needed_cols].copy()
+
+    # по желание: махни очевидни нули/спирания от визуализацията
+    min_plot_speed = st.slider("Минимална скорост за графиката [km/h]", 0.0, 10.0, 0.0, 0.5)
+    if min_plot_speed > 0:
+        df_speed = df_speed[df_speed["v_kmh"] >= min_plot_speed].copy()
+
+    df_long = df_speed.melt(id_vars=["time_s"], var_name="series", value_name="v")
+
+    name_map = {
+        "v_kmh": "V_real (raw)",
+        "v_glide": "V_glide (mod 1)",
+        "v_flat_eq": "V_flat_eq (mod 2)",
+        "v_flat_eq_cs": "V_flat_eq_cs (mod 3 / CS)",
+    }
+    df_long["series"] = df_long["series"].map(name_map).fillna(df_long["series"])
+
+    chart_speed = alt.Chart(df_long).mark_line().encode(
+        x=alt.X("time_s:Q", title="Време [s]"),
+        y=alt.Y("v:Q", title="Скорост [km/h]"),
+        color=alt.Color("series:N", title="Серия"),
+        tooltip=["time_s:Q", "series:N", "v:Q"],
+    )
+    st.altair_chart(chart_speed, use_container_width=True)
+
 
 # ---------------------------------------------------------
 # Global V=f(HR) models from ALL activities
