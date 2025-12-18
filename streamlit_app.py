@@ -7,8 +7,13 @@ from datetime import datetime
 import math
 import altair as alt
 
-from cs_modulator import apply_cs_modulation, calibrate_k_for_target_t90, predict_t90_for_reference
-from fatigue_model import zone_points_paired, zone_points_count_sorted, fit_v_of_hr_global, fatigue_index_series
+from fatigue_model import (
+    zone_points_paired,
+    zone_points_count_sorted,
+    fit_v_of_hr_global,
+    fatigue_index_series,
+)
+
 
 
 # ---------------------------------------------------------
