@@ -12,35 +12,33 @@ from cs_modulator import (
     calibrate_k_for_target_t90,
     predict_t90_for_reference,
 )
+
 from fatigue_model import (
     zone_points_paired,
     zone_points_count_sorted,
-    fit_v_of_hr,
-    fatigue_index_series,
-    global_zone_points_all_activities,
     fit_v_of_hr_global,
+    fatigue_index_series,
 )
 
 # ---------------------------------------------------------
-# НАСТРОЙКИ
+# SETTINGS
 # ---------------------------------------------------------
-T_SEG = 7.0            # дължина на сегмента [s]
-MIN_D_SEG = 5.0        # минимум хоризонтална дистанция [m]
-MIN_T_SEG = 4.0        # минимум продължителност [s]
-MAX_ABS_SLOPE = 15.0   # макс. наклон [%]
-V_JUMP_KMH = 15.0      # праг за "скачане" на скоростта между сегменти
-V_JUMP_MIN = 20.0      # гледаме спайкове само над тази скорост [km/h]
+T_SEG = 7.0
+MIN_D_SEG = 5.0
+MIN_T_SEG = 4.0
+MAX_ABS_SLOPE = 15.0
+V_JUMP_KMH = 15.0
+V_JUMP_MIN = 20.0
 
-GLIDE_POLY_DEG = 2     # степен на полинома за плъзгаемост
-SLOPE_POLY_DEG = 2     # степен на полинома за наклон
+GLIDE_POLY_DEG = 2
+SLOPE_POLY_DEG = 2
 
-# Зонна система като % от критичната скорост
 ZONE_BOUNDS = [0.0, 0.75, 0.85, 0.95, 1.05, 1.15, np.inf]
 ZONE_NAMES = ["Z1", "Z2", "Z3", "Z4", "Z5", "Z6"]
 
 
 # ---------------------------------------------------------
-# ВСПОМОГАТЕЛНИ ФУНКЦИИ
+# HELPERS
 # ---------------------------------------------------------
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000.0
@@ -56,7 +54,8 @@ def haversine(lat1, lon1, lat2, lon2):
 
 def poly_to_str(poly, var="s"):
     if poly is None:
-        return "няма модел (недостатъчно данни)"
+        return "няма модел"
+
     coeffs = poly.coefficients
     deg = poly.order
 
@@ -68,15 +67,11 @@ def poly_to_str(poly, var="s"):
         return (f"{fmt_coef(a)}·{var}² "
                 f"{'+ ' if b >= 0 else '- '}{fmt_coef(abs(b))}·{var} "
                 f"{'+ ' if c >= 0 else '- '}{fmt_coef(abs(c))}")
-    elif deg == 1:
+    if deg == 1:
         a, b = coeffs
         return (f"{fmt_coef(a)}·{var} "
                 f"{'+ ' if b >= 0 else '- '}{fmt_coef(abs(b))}")
-    else:
-        return " + ".join(
-            f"{fmt_coef(c)}·{var}^{p}"
-            for p, c in zip(range(deg, -1, -1), coeffs)
-        )
+    return str(poly)
 
 
 def seconds_to_hhmmss(seconds: float) -> str:
@@ -89,22 +84,27 @@ def seconds_to_hhmmss(seconds: float) -> str:
     return f"{h}:{m:02d}:{sec:02d}"
 
 
+def estimate_seg_dt_seconds(seg_df: pd.DataFrame) -> float:
+    if seg_df.empty or "dt_s" not in seg_df.columns:
+        return T_SEG
+    v = seg_df["dt_s"].dropna().to_numpy(dtype=float)
+    if len(v) == 0:
+        return T_SEG
+    return float(np.median(v))
+
+
 def clean_speed_for_cs(g, v_max_cs=50.0):
     v = g["v_flat_eq"].to_numpy(dtype=float)
     v = np.clip(v, 0.0, v_max_cs)
 
-    if "speed_spike" in g.columns:
-        is_spike = g["speed_spike"].to_numpy(dtype=bool)
-    else:
-        is_spike = np.zeros_like(v, dtype=bool)
-
+    is_spike = g["speed_spike"].to_numpy(dtype=bool) if "speed_spike" in g.columns else np.zeros_like(v, dtype=bool)
     if not is_spike.any():
         return v
 
     v_clean = v.copy()
     idx = np.arange(len(v_clean))
-
     good = ~is_spike
+
     if good.sum() == 0:
         return v_clean
     if good.sum() == 1:
@@ -115,33 +115,8 @@ def clean_speed_for_cs(g, v_max_cs=50.0):
     return v_clean
 
 
-def estimate_seg_dt_seconds(df_seg: pd.DataFrame) -> float:
-    if df_seg.empty or "dt_s" not in df_seg.columns:
-        return T_SEG
-    v = df_seg["dt_s"].dropna()
-    if v.empty:
-        return T_SEG
-    return float(np.median(v))
-
-
-def apply_hr_lag(seg_df: pd.DataFrame, lag_s: float, hr_col="hr_mean") -> pd.DataFrame:
-    """
-    speed изпреварва HR с lag_s:
-      HR_aligned(t) = HR(t + lag_s)
-    Реализация: shift(-shift_n) върху HR.
-    """
-    df = seg_df.copy()
-    dt_est = estimate_seg_dt_seconds(df)
-    shift_n = int(round(max(lag_s, 0.0) / max(dt_est, 1e-6)))
-
-    df["hr_aligned"] = df.groupby("activity")[hr_col].shift(-shift_n) if shift_n > 0 else df[hr_col]
-    df["hr_lag_s_used"] = float(lag_s)
-    df["hr_shift_n"] = int(shift_n)
-    return df
-
-
 # ---------------------------------------------------------
-# TCX PARSER – с пулс
+# TCX PARSER
 # ---------------------------------------------------------
 def parse_tcx(file, activity_label):
     content = file.read()
@@ -193,18 +168,13 @@ def parse_tcx(file, activity_label):
     df.sort_values("time", inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    # ако няма дистанция – смятаме грубо от lat/lon
     if df["dist"].isna().all():
         df["dist"] = 0.0
         for i in range(1, len(df)):
-            if None in (df.at[i-1, "lat"], df.at[i-1, "lon"],
-                        df.at[i, "lat"], df.at[i, "lon"]):
+            if None in (df.at[i-1, "lat"], df.at[i-1, "lon"], df.at[i, "lat"], df.at[i, "lon"]):
                 df.at[i, "dist"] = df.at[i-1, "dist"]
                 continue
-            d = haversine(
-                df.at[i-1, "lat"], df.at[i-1, "lon"],
-                df.at[i, "lat"], df.at[i, "lon"]
-            )
+            d = haversine(df.at[i-1, "lat"], df.at[i-1, "lon"], df.at[i, "lat"], df.at[i, "lon"])
             df.at[i, "dist"] = df.at[i-1, "dist"] + d
 
     df["dist"] = df["dist"].ffill()
@@ -212,7 +182,7 @@ def parse_tcx(file, activity_label):
 
 
 # ---------------------------------------------------------
-# СЕГМЕНТИРАНЕ НА 7 s (с hr_mean)
+# SEGMENTATION (7s)
 # ---------------------------------------------------------
 def build_segments(df_activity, activity_label):
     if df_activity.empty:
@@ -291,9 +261,6 @@ def build_segments(df_activity, activity_label):
     return pd.DataFrame(seg_rows)
 
 
-# ---------------------------------------------------------
-# ФИЛТРИ ЗА НЕРЕАЛИСТИЧНИ СЕГМЕНТИ
-# ---------------------------------------------------------
 def apply_basic_filters(segments):
     seg = segments.copy()
 
@@ -316,12 +283,11 @@ def apply_basic_filters(segments):
     seg = seg.groupby("activity", group_keys=False).apply(mark_speed_spikes)
     seg["speed_spike"] = seg["speed_spike"].fillna(False)
     seg.loc[seg["speed_spike"], "valid_basic"] = False
-
     return seg
 
 
 # ---------------------------------------------------------
-# МОДЕЛ ЗА ПЛЪЗГАЕМОСТ (GLIDE)
+# GLIDE MODEL
 # ---------------------------------------------------------
 def get_glide_training_segments(seg):
     df = seg.copy()
@@ -334,9 +300,7 @@ def get_glide_training_segments(seg):
         (df["slope_pct"] <= -5.0) &
         (df["prev_slope"] <= -5.0)
     )
-
-    train = df[cond].copy()
-    return train
+    return df[cond].copy()
 
 
 def fit_glide_poly(train_df):
@@ -381,7 +345,7 @@ def apply_glide_modulation(seg, glide_coeffs):
 
 
 # ---------------------------------------------------------
-# МОДЕЛ ЗА НАКЛОН
+# SLOPE MODEL
 # ---------------------------------------------------------
 def compute_flat_ref_speeds(seg_glide):
     flat_refs = {}
@@ -435,10 +399,8 @@ def apply_slope_modulation(seg_glide, slope_poly, V_crit):
 
     mask_mid = np.abs(slopes) <= 1.0
     F_vals[mask_mid] = 1.0
-
     mask_down = slopes < -1.0
     F_vals[mask_down] = np.minimum(F_vals[mask_down], 1.0)
-
     mask_up = slopes > 1.0
     F_vals[mask_up] = np.maximum(F_vals[mask_up], 1.0)
 
@@ -453,104 +415,39 @@ def apply_slope_modulation(seg_glide, slope_poly, V_crit):
 
 
 # ---------------------------------------------------------
-# ОБОБЩЕНИЕ ПО АКТИВНОСТИ
+# HR ALIGNMENT (lag)
 # ---------------------------------------------------------
-def build_activity_summary(
-    segments_f,
-    train_glide,
-    seg_glide,
-    seg_slope,
-    seg_slope_cs,
-    glide_coeffs
-):
-    activities = sorted(segments_f["activity"].unique())
-    summary = pd.DataFrame({"activity": activities})
+def add_hr_aligned(seg_df: pd.DataFrame, hr_lag_s: float) -> pd.DataFrame:
+    """
+    HR_lagged (+40s) означава:
+      speed(t) -> HR(t + lag)
+    т.е. за сегмент i взимаме HR от бъдещ сегмент i+shift_n
+    => pandas shift(-shift_n)
+    """
+    df = seg_df.copy()
+    dt_est = estimate_seg_dt_seconds(df)
+    shift_n = int(round(hr_lag_s / max(dt_est, 1e-6)))
+    if shift_n < 0:
+        shift_n = 0
 
-    if not train_glide.empty:
-        glide_train_agg = train_glide.groupby("activity").agg(
-            slope_glide_mean=("slope_pct", "mean"),
-            v_glide_train_mean=("v_kmh", "mean"),
-        ).reset_index()
-        summary = summary.merge(glide_train_agg, on="activity", how="left")
-    else:
-        summary["slope_glide_mean"] = np.nan
-        summary["v_glide_train_mean"] = np.nan
-
-    if glide_coeffs:
-        K_glide_df = pd.DataFrame(
-            {"activity": list(glide_coeffs.keys()),
-             "K_glide": list(glide_coeffs.values())}
-        )
-        summary = summary.merge(K_glide_df, on="activity", how="left")
-    else:
-        summary["K_glide"] = np.nan
-
-    real_agg = segments_f[segments_f["valid_basic"]].groupby("activity").agg(
-        v_real_mean=("v_kmh", "mean")
-    ).reset_index()
-    summary = summary.merge(real_agg, on="activity", how="left")
-
-    glide_agg = seg_glide[seg_glide["valid_basic"]].groupby("activity").agg(
-        v_glide_mean=("v_glide", "mean")
-    ).reset_index()
-    summary = summary.merge(glide_agg, on="activity", how="left")
-
-    slope_agg = seg_slope[seg_slope["valid_basic"]].groupby("activity").agg(
-        v_flat_mean=("v_flat_eq", "mean")
-    ).reset_index()
-    summary = summary.merge(slope_agg, on="activity", how="left")
-
-    cs_agg = seg_slope_cs[seg_slope_cs["valid_basic"]].groupby("activity").agg(
-        v_flat_cs_mean=("v_flat_eq_cs", "mean")
-    ).reset_index()
-    summary = summary.merge(cs_agg, on="activity", how="left")
-
-    summary["K_slope_eff"] = summary["v_flat_mean"] / summary["v_glide_mean"]
-
-    summary = summary[
-        [
-            "activity",
-            "slope_glide_mean",
-            "v_glide_train_mean",
-            "K_glide",
-            "v_real_mean",
-            "v_glide_mean",
-            "v_flat_mean",
-            "v_flat_cs_mean",
-            "K_slope_eff",
-        ]
-    ]
-
-    summary = summary.rename(columns={
-        "activity": "Активност",
-        "slope_glide_mean": "Среден наклон на спусканията за модел [%]",
-        "v_glide_train_mean": "Средна скорост на спусканията за модел [km/h]",
-        "K_glide": "Коефициент плъзгаемост K_glide",
-        "v_real_mean": "Средна реална скорост [km/h]",
-        "v_glide_mean": "Средна скорост след плъзгаемост [km/h]",
-        "v_flat_mean": "Средна скорост еквив. на равно [km/h]",
-        "v_flat_cs_mean": "Средна скорост след CS модулация [km/h]",
-        "K_slope_eff": "Ефективен коефициент наклон K_slope",
-    })
-
-    return summary
+    df["hr_aligned"] = df.groupby("activity")["hr_mean"].shift(-shift_n)
+    return df
 
 
 # ---------------------------------------------------------
-# ЗОНИ ПО СКОРОСТ
+# ZONING
 # ---------------------------------------------------------
-def assign_speed_zones(seg_any_speed, V_crit, speed_col="v_flat_eq"):
-    df = seg_any_speed.copy()
-    if V_crit is None or V_crit <= 0:
+def assign_speed_zones(seg_df: pd.DataFrame, V_crit: float, speed_col: str = "v_flat_eq") -> pd.DataFrame:
+    df = seg_df.copy()
+    if V_crit is None or V_crit <= 0 or speed_col not in df.columns:
         df["rel_crit"] = np.nan
         df["zone"] = None
         return df
 
     df["rel_crit"] = df[speed_col] / V_crit
-
     zones = []
-    for r in df["rel_crit"]:
-        if pd.isna(r):
+    for r in df["rel_crit"].to_numpy(dtype=float):
+        if np.isnan(r):
             zones.append(None)
             continue
         z_name = None
@@ -563,190 +460,102 @@ def assign_speed_zones(seg_any_speed, V_crit, speed_col="v_flat_eq"):
     return df
 
 
-def summarize_speed_zones(seg_zones, speed_col="v_flat_eq"):
-    df = seg_zones.dropna(subset=["zone"]).copy()
+def build_zone_table(seg_df: pd.DataFrame, speed_col: str, scheme: str, hr_col: str) -> pd.DataFrame:
+    """
+    Връща:
+      Зона | Брой сегменти | Време | Средна скорост | Среден пулс
+    scheme: "A" paired или "B" count-sorted
+    """
+    df = seg_df.dropna(subset=["zone"]).copy()
     if df.empty:
-        return pd.DataFrame(columns=["zone", "n_segments", "total_time_s", "mean_speed"])
-    agg = df.groupby("zone").agg(
+        return pd.DataFrame(columns=["Зона", "Брой сегменти", "Време [ч:мм:сс]", "Средна скорост [km/h]", "Среден пулс [bpm]"])
+
+    # speed summary по зоните
+    speed_summary = df.groupby("zone").agg(
         n_segments=("seg_idx", "count"),
         total_time_s=("dt_s", "sum"),
         mean_speed=(speed_col, "mean"),
     ).reset_index()
-    agg = agg.sort_values("zone")
-    return agg
 
+    speed_summary["time_hhmmss"] = speed_summary["total_time_s"].apply(seconds_to_hhmmss)
 
-# ---------------------------------------------------------
-# HR по зони – 2 схеми
-# ---------------------------------------------------------
-def zone_hr_scheme_A_paired(seg_zones, hr_col="hr_aligned"):
-    df = seg_zones.copy()
-    out = []
-    for z in ZONE_NAMES:
-        g = df[df["zone"] == z]
-        if g.empty:
-            out.append({"zone": z, "mean_hr_zone": np.nan})
-            continue
-        vals = g[hr_col].dropna().to_numpy(dtype=float)
-        if len(vals) == 0:
-            out.append({"zone": z, "mean_hr_zone": np.nan})
-            continue
-        vals.sort()
-        if len(vals) >= 20:
-            k = int(round(0.10 * len(vals)))
-            vals = vals[k:len(vals)-k] if len(vals) - 2*k > 0 else vals
-        out.append({"zone": z, "mean_hr_zone": float(np.mean(vals))})
-    return pd.DataFrame(out)
-
-
-def zone_hr_scheme_B_count_sorted(seg_df, zone_counts, hr_col="hr_aligned"):
-    df_hr = seg_df.copy()
-    if "speed_spike" in df_hr.columns:
-        df_hr = df_hr[~df_hr["speed_spike"].fillna(False)]
-    df_hr = df_hr.dropna(subset=[hr_col]).copy()
-
-    if df_hr.empty:
-        return pd.DataFrame([{"zone": z, "mean_hr_zone": np.nan} for z in ZONE_NAMES])
-
-    df_hr = df_hr.sort_values(hr_col).reset_index(drop=True)
-
-    results = []
-    start_idx = 0
-    for z in ZONE_NAMES:
-        n = int(zone_counts.get(z, 0))
-        if n <= 0 or start_idx >= len(df_hr):
-            results.append({"zone": z, "mean_hr_zone": np.nan})
-            continue
-        end_idx = min(start_idx + n, len(df_hr))
-        subset = df_hr.iloc[start_idx:end_idx]
-        mean_hr = subset[hr_col].mean() if not subset.empty else np.nan
-        results.append({"zone": z, "mean_hr_zone": float(mean_hr) if not pd.isna(mean_hr) else np.nan})
-        start_idx = end_idx
-
-    return pd.DataFrame(results)
-
-
-def build_zone_speed_hr_table(seg_zones, speed_col, hr_scheme="A", hr_col="hr_aligned", activity=None):
-    if activity is not None:
-        df = seg_zones[seg_zones["activity"] == activity].copy()
+    if scheme.upper() == "A":
+        hr_summary = df.groupby("zone")[hr_col].mean().reset_index().rename(columns={hr_col: "mean_hr"})
     else:
-        df = seg_zones.copy()
+        # count-sorted
+        counts = dict(zip(speed_summary["zone"], speed_summary["n_segments"]))
 
-    if df.empty:
-        return pd.DataFrame(columns=[
-            "Зона", "Брой сегменти", "Време [ч:мм:сс]",
-            "Средна скорост [km/h]", "Среден пулс [bpm]"
-        ])
+        df_hr = seg_df.copy()
+        if "speed_spike" in df_hr.columns:
+            df_hr = df_hr[~df_hr["speed_spike"].fillna(False)]
+        df_hr = df_hr.dropna(subset=[hr_col]).copy()
+        df_hr = df_hr.sort_values(hr_col).reset_index(drop=True)
 
-    speed_summary = summarize_speed_zones(df, speed_col=speed_col)
-    if speed_summary.empty:
-        return pd.DataFrame(columns=[
-            "Зона", "Брой сегменти", "Време [ч:мм:сс]",
-            "Средна скорост [km/h]", "Среден пулс [bpm]"
-        ])
+        rows = []
+        start = 0
+        for z in ZONE_NAMES:
+            n = int(counts.get(z, 0))
+            if n <= 0 or start >= len(df_hr):
+                rows.append({"zone": z, "mean_hr": np.nan})
+                continue
+            end = min(start + n, len(df_hr))
+            subset = df_hr.iloc[start:end]
+            rows.append({"zone": z, "mean_hr": float(subset[hr_col].mean()) if not subset.empty else np.nan})
+            start = end
+        hr_summary = pd.DataFrame(rows)
 
-    zone_counts = dict(zip(speed_summary["zone"], speed_summary["n_segments"]))
+    out = speed_summary.merge(hr_summary, left_on="zone", right_on="zone", how="left")
 
-    if hr_scheme.upper() == "A":
-        hr_summary = zone_hr_scheme_A_paired(df, hr_col=hr_col)
-    else:
-        hr_summary = zone_hr_scheme_B_count_sorted(df, zone_counts, hr_col=hr_col)
-
-    merged = pd.merge(speed_summary, hr_summary, on="zone", how="left")
-    merged["time_hhmmss"] = merged["total_time_s"].apply(seconds_to_hhmmss)
-
-    merged = merged.rename(columns={
+    out = out.rename(columns={
         "zone": "Зона",
         "n_segments": "Брой сегменти",
         "time_hhmmss": "Време [ч:мм:сс]",
         "mean_speed": "Средна скорост [km/h]",
-        "mean_hr_zone": "Среден пулс [bpm]",
+        "mean_hr": "Среден пулс [bpm]",
     })
 
-    merged = merged[[
-        "Зона", "Брой сегменти", "Време [ч:мм:сс]",
-        "Средна скорост [km/h]", "Среден пулс [bpm]"
-    ]]
-
-    return merged
+    out = out[["Зона", "Брой сегменти", "Време [ч:мм:сс]", "Средна скорост [km/h]", "Среден пулс [bpm]"]]
+    return out.sort_values("Зона")
 
 
 # ---------------------------------------------------------
-# STREAMLIT APP
+# STREAMLIT UI
 # ---------------------------------------------------------
 st.set_page_config(page_title="Ski Glide & Slope Model", layout="wide")
-st.title("Модел за плъзгаемост, наклон и кислороден дълг + HR lag тест")
+st.title("Модел за плъзгаемост, наклон и кислороден дълг + HR lag + V=f(HR) + Индекс на умора")
 
-# ---------- Sidebar: основни параметри ----------
-st.sidebar.header("Параметри на наклона и плъзгаемостта")
-
-V_crit = st.sidebar.number_input(
-    "Критична скорост V_crit [km/h]",
-    min_value=5.0,
-    max_value=40.0,
-    value=20.0,
-    step=0.5,
-)
-
-DAMP_GLIDE = st.sidebar.slider(
-    "Омекотяване на плъзгаемостта α",
-    min_value=0.0,
-    max_value=1.0,
-    value=1.0,
-    step=0.05,
-)
+# Sidebar parameters
+st.sidebar.header("Параметри (наклон/плъзгаемост/зони)")
+V_crit = st.sidebar.number_input("Критична скорост V_crit [km/h]", min_value=5.0, max_value=40.0, value=20.0, step=0.5)
+DAMP_GLIDE = st.sidebar.slider("Омекотяване на плъзгаемостта α", min_value=0.0, max_value=1.0, value=1.0, step=0.05)
 
 st.sidebar.markdown("---")
-
-# ---------- Sidebar: HR lag + HR схема ----------
-st.sidebar.header("HR lag и зониране по 2 схеми")
-
-hr_lag_s = st.sidebar.slider(
-    "Lag на пулса спрямо скоростта (speed leads HR) [s]",
-    min_value=0,
-    max_value=120,
-    value=40,
-    step=5,
-)
-
-hr_source_for_tables = st.sidebar.selectbox(
-    "Кой пулс да се ползва за зонните таблици?",
-    ["hr_aligned (с lag)", "hr_mean (без lag)"],
-    index=0
-)
-hr_col_used = "hr_aligned" if "aligned" in hr_source_for_tables else "hr_mean"
+st.sidebar.header("HR синхронизация (lag)")
+hr_lag_s = st.sidebar.slider("HR lag [s] (speed изпреварва пулса)", min_value=0, max_value=120, value=40, step=1)
+hr_col_used = st.sidebar.selectbox("Кой пулс да се ползва за модели/таблици?", ["hr_aligned", "hr_mean"], index=0)
 
 st.sidebar.markdown("---")
-
-# ---------- Sidebar: CS / кислороден дълг ----------
 st.sidebar.header("CS модел (кислороден „дълг“)")
 
 use_vcrit_as_cs = st.sidebar.checkbox("Използвай V_crit като CS", value=True)
-CS = V_crit if use_vcrit_as_cs else st.sidebar.number_input("Критична скорост CS [km/h]", 5.0, 40.0, 18.0, 0.5)
+CS = V_crit if use_vcrit_as_cs else st.sidebar.number_input("CS [km/h]", min_value=5.0, max_value=40.0, value=18.0, step=0.5)
 
-tau_min = st.sidebar.number_input("τ_min (s)", 5.0, 120.0, 25.0, 1.0)
-k_par = st.sidebar.number_input("k (τ растеж)", 0.0, 500.0, 35.0, 1.0)
-q_par = st.sidebar.number_input("q (нелинейност)", 0.1, 3.0, 1.3, 0.1)
-
-gamma_cs = st.sidebar.slider("γ (влияние на дълга)", 0.0, 1.0, 1.0, 0.05)
+tau_min = st.sidebar.number_input("τ_min (s)", min_value=5.0, max_value=120.0, value=25.0, step=1.0)
+k_par = st.sidebar.number_input("k (τ растеж)", min_value=0.0, max_value=500.0, value=35.0, step=1.0)
+q_par = st.sidebar.number_input("q (нелинейност)", min_value=0.1, max_value=3.0, value=1.3, step=0.1)
+gamma_cs = st.sidebar.slider("γ (влияние на дълга)", min_value=0.0, max_value=1.0, value=1.0, step=0.05)
 
 st.sidebar.subheader("Калибрация по референтен сценарий")
-ref_percent = st.sidebar.number_input("Референтна интензивност (% от CS)", 101.0, 200.0, 105.0, 0.5)
-target_t90 = st.sidebar.number_input("Желано t₉₀ (s)", 10.0, 1200.0, 60.0, 5.0)
-
+ref_percent = st.sidebar.number_input("Референтна интензивност (% от CS)", min_value=101.0, max_value=200.0, value=105.0, step=0.5)
+target_t90 = st.sidebar.number_input("Желано t₉₀ (s)", min_value=10.0, max_value=1200.0, value=60.0, step=5.0)
 do_calibrate = st.sidebar.button("Приложи калибрация (пресметни k)")
 
-uploaded_files = st.file_uploader(
-    "Качи един или няколко TCX файла:",
-    type=["tcx"],
-    accept_multiple_files=True
-)
-
+uploaded_files = st.file_uploader("Качи един или няколко TCX файла:", type=["tcx"], accept_multiple_files=True)
 if not uploaded_files:
     st.info("Качи поне един TCX файл, за да започнем.")
     st.stop()
 
-# 1) Парсване
+# Parse TCX
 all_points = []
 for f in uploaded_files:
     label = f.name
@@ -760,7 +569,7 @@ if not all_points:
 
 points = pd.concat(all_points, ignore_index=True)
 
-# 2) Сегментиране
+# Segment
 seg_list = []
 for act, g in points.groupby("activity"):
     seg_df = build_segments(g, act)
@@ -769,13 +578,12 @@ for act, g in points.groupby("activity"):
 
 segments = pd.concat(seg_list, ignore_index=True) if seg_list else pd.DataFrame()
 if segments.empty:
-    st.error("Не успях да създам сегменти. Провери TCX файловете.")
+    st.error("Не успях да създам сегменти.")
     st.stop()
 
-# 3) Базови филтри
 segments_f = apply_basic_filters(segments)
 
-# 4) Glide модел
+# Glide
 train_glide = get_glide_training_segments(segments_f)
 glide_poly = fit_glide_poly(train_glide)
 
@@ -786,7 +594,7 @@ else:
     glide_coeffs = compute_glide_coefficients(segments_f, glide_poly, DAMP_GLIDE)
     seg_glide = apply_glide_modulation(segments_f, glide_coeffs)
 
-# 5) Slope модел
+# Slope
 flat_refs = compute_flat_ref_speeds(seg_glide)
 slope_train = get_slope_training_data(seg_glide, flat_refs)
 raw_slope_poly = fit_slope_poly(slope_train)
@@ -802,20 +610,21 @@ else:
     slope_poly = np.poly1d(coeffs)
     seg_slope = apply_slope_modulation(seg_glide, slope_poly, V_crit)
 
-# 5a) чистене от спайкове
+# Clean v_flat_eq spikes
 seg_slope = seg_slope.sort_values(["activity", "t_start"]).reset_index(drop=True)
 for act, g_act in seg_slope.groupby("activity"):
     v_clean = clean_speed_for_cs(g_act, v_max_cs=50.0)
     seg_slope.loc[g_act.index, "v_flat_eq"] = v_clean
 
-# 5b) HR lag alignment (на сегментно ниво)
-seg_slope = apply_hr_lag(seg_slope, lag_s=float(hr_lag_s), hr_col="hr_mean")
+# Add HR aligned (lag)
+seg_slope = add_hr_aligned(seg_slope, hr_lag_s=hr_lag_s)
 
-# 6) CS модулация върху v_flat_eq
+# CS calibration
 if do_calibrate:
     k_par = calibrate_k_for_target_t90(CS, ref_percent, tau_min, q_par, target_t90)
     st.sidebar.success(f"Нов k = {k_par:.2f} (приложен)")
 
+# CS modulation on v_flat_eq
 seg_slope = seg_slope.sort_values(["activity", "t_start"]).reset_index(drop=True)
 seg_slope["time_s"] = seg_slope.groupby("activity")["dt_s"].cumsum() - seg_slope["dt_s"]
 
@@ -843,445 +652,194 @@ for act, g in seg_slope.groupby("activity"):
 
 seg_slope_cs = pd.concat(cs_rows, ignore_index=True)
 
-# t90 диагностична метрика
+# Re-add aligned HR to CS DF (keeps same alignment)
+seg_slope_cs["hr_aligned"] = seg_slope_cs["hr_aligned"]
+
+# CS diagnostics
 dv_ref, tau_ref_now, t90_now = predict_t90_for_reference(CS, ref_percent, tau_min, k_par, q_par)
-st.caption(
-    f"CS модел: Δv_ref = {dv_ref:.2f} km/h, τ_ref ≈ {tau_ref_now:.1f} s, "
-    f"t₉₀ ≈ {t90_now:.0f} s при {ref_percent:.1f}% от CS."
-)
-
-# 7) Обобщение по активности
-summary_df = build_activity_summary(
-    segments_f,
-    train_glide,
-    seg_glide,
-    seg_slope,
-    seg_slope_cs,
-    glide_coeffs
-)
-
-st.subheader("Обобщение по активности (след нормализация + CS + HR lag инфо)")
-st.dataframe(summary_df, use_container_width=True)
+st.caption(f"CS модел: Δv_ref={dv_ref:.2f} km/h, τ_ref≈{tau_ref_now:.1f} s, t90≈{t90_now:.0f} s при {ref_percent:.1f}% от CS.")
 
 # ---------------------------------------------------------
-# ГРАФИКА: скорости + HR (две оси)
+# Charts for glide/slope (optional)
 # ---------------------------------------------------------
-st.subheader("Времева серия: скорости (реална/модулирана) и пулс (с/без lag)")
+st.subheader("Модели: плъзгаемост и наклон (диагностика)")
 
-act_list = sorted(seg_slope_cs["activity"].unique())
-act_selected = st.selectbox("Избери активност за графика:", act_list, key="plot_act_select")
-g_plot = seg_slope_cs[seg_slope_cs["activity"] == act_selected].copy()
+colm_a, colm_b = st.columns(2)
 
-if not g_plot.empty:
-    dt_est = estimate_seg_dt_seconds(g_plot)
-    shift_n = int(round(hr_lag_s / max(dt_est, 1e-6)))
-    st.caption(f"dt≈{dt_est:.2f}s | HR lag={hr_lag_s}s → shift_n={shift_n} сегмента")
+with colm_a:
+    st.markdown("### Плъзгаемост (спускания под -5%)")
+    if not train_glide.empty and glide_poly is not None:
+        s_min = train_glide["slope_pct"].min()
+        s_max = train_glide["slope_pct"].max()
+        s_grid = np.linspace(s_min, s_max, 200)
+        df_glide_curve = pd.DataFrame({"slope_pct": s_grid, "v_model": glide_poly(s_grid)})
 
-    df_plot = g_plot[[
-        "time_s", "v_kmh", "v_glide", "v_flat_eq", "v_flat_eq_cs", "hr_mean", "hr_aligned"
-    ]].copy()
+        chart_points = alt.Chart(train_glide).mark_circle(size=30).encode(
+            x=alt.X("slope_pct", title="Наклон [%]"),
+            y=alt.Y("v_kmh", title="Скорост [km/h]"),
+            color="activity:N"
+        )
+        chart_curve = alt.Chart(df_glide_curve).mark_line().encode(x="slope_pct", y="v_model")
+        st.altair_chart(chart_points + chart_curve, use_container_width=True)
+        st.caption(f"v(s) = {poly_to_str(glide_poly, var='s')}")
+    else:
+        st.info("Няма достатъчно данни за glide модел.")
 
-    speed_long = df_plot.melt(
-        id_vars=["time_s"],
-        value_vars=["v_kmh", "v_glide", "v_flat_eq", "v_flat_eq_cs"],
-        var_name="series",
-        value_name="value"
-    )
-    speed_names = {
-        "v_kmh": "V_real",
-        "v_glide": "V_glide",
-        "v_flat_eq": "V_flat_eq",
-        "v_flat_eq_cs": "V_flat_eq_cs",
-    }
-    speed_long["series"] = speed_long["series"].map(speed_names)
+with colm_b:
+    st.markdown("### Наклон: F(slope)")
+    if not slope_train.empty and slope_poly is not None:
+        s_min2 = slope_train["slope_pct"].min()
+        s_max2 = slope_train["slope_pct"].max()
+        s_grid2 = np.linspace(s_min2, s_max2, 200)
+        df_slope_curve = pd.DataFrame({"slope_pct": s_grid2, "F_model": slope_poly(s_grid2)})
 
-    speed_chart = alt.Chart(speed_long).mark_line().encode(
-        x=alt.X("time_s:Q", title="Време [s]"),
-        y=alt.Y("value:Q", title="Скорост [km/h]"),
-        color=alt.Color("series:N", title="Скоростни серии"),
-        tooltip=["time_s:Q", "series:N", "value:Q"]
-    )
-
-    hr_long = df_plot.melt(
-        id_vars=["time_s"],
-        value_vars=["hr_mean", "hr_aligned"],
-        var_name="hr_series",
-        value_name="hr_value"
-    )
-    hr_names = {"hr_mean": "HR_raw", "hr_aligned": f"HR_aligned(+{hr_lag_s}s)"}
-    hr_long["hr_series"] = hr_long["hr_series"].map(hr_names)
-
-    hr_chart = alt.Chart(hr_long).mark_line(strokeDash=[6, 3]).encode(
-        x="time_s:Q",
-        y=alt.Y("hr_value:Q", title="Пулс [bpm]", axis=alt.Axis(orient="right")),
-        color=alt.Color("hr_series:N", title="HR серии"),
-        tooltip=["time_s:Q", "hr_series:N", "hr_value:Q"]
-    )
-
-    layered = alt.layer(speed_chart, hr_chart).resolve_scale(y="independent")
-    st.altair_chart(layered, use_container_width=True)
+        chart_points2 = alt.Chart(slope_train).mark_circle(size=30).encode(
+            x=alt.X("slope_pct", title="Наклон [%]"),
+            y=alt.Y("F", title="F = V_flat_ref / v_glide"),
+        )
+        chart_curve2 = alt.Chart(df_slope_curve).mark_line().encode(x="slope_pct", y="F_model")
+        st.altair_chart(chart_points2 + chart_curve2, use_container_width=True)
+        st.caption(f"F(s) = {poly_to_str(slope_poly, var='s')}")
+    else:
+        st.info("Няма достатъчно данни за slope модел.")
 
 # ---------------------------------------------------------
-# ✅ ЕДНА ОБЩА ТАБЛИЦА: скорости (всички) + HR (raw + lag)
+# ZONES TABLES (4)
 # ---------------------------------------------------------
-st.subheader("Една обща таблица: V_real, V_glide, V_flat_eq, V_flat_eq_cs + HR (raw и lag)")
+st.subheader("Зони (4 таблици): Без CS / С CS  ×  Схема A / Схема B")
 
-cols_big = [
-    "activity",
-    "seg_idx",
-    "time_s",
-    "dt_s",
-    "d_m",
-    "slope_pct",
-    "v_kmh",
-    "v_glide",
-    "v_flat_eq",
-    "v_flat_eq_cs",
-    "delta_v_plus_kmh",
-    "r_kmh",
-    "tau_s",
-    "hr_mean",
-    "hr_aligned",
-    "hr_lag_s_used",
-    "hr_shift_n",
-    "valid_basic",
-    "speed_spike",
-]
-cols_big = [c for c in cols_big if c in seg_slope_cs.columns]
+# Create zones for both speeds
+seg_no_cs = assign_speed_zones(seg_slope, V_crit, speed_col="v_flat_eq")
+seg_with_cs = assign_speed_zones(seg_slope_cs, V_crit, speed_col="v_flat_eq_cs")
 
-big_table = seg_slope_cs[seg_slope_cs["activity"] == act_selected][cols_big].copy()
+# Labels
+hr_label = f"HR_lagged (+{hr_lag_s}s)" if hr_col_used == "hr_aligned" else "HR_raw (без lag)"
 
-big_table = big_table.rename(columns={
-    "seg_idx": "seg",
-    "time_s": "t [s]",
-    "dt_s": "dt [s]",
-    "d_m": "d [m]",
-    "slope_pct": "slope [%]",
-    "v_kmh": "V_real [km/h]",
-    "v_glide": "V_glide [km/h]",
-    "v_flat_eq": "V_flat_eq [km/h]",
-    "v_flat_eq_cs": "V_flat_eq_cs (x3) [km/h]",
-    "delta_v_plus_kmh": "Δv+ [km/h]",
-    "r_kmh": "r [km/h]",
-    "tau_s": "τ_cs [s]",
-    "hr_mean": "HR_raw [bpm]",
-    "hr_aligned": f"HR_lagged(+{hr_lag_s}s) [bpm]",
-    "hr_lag_s_used": "HR lag [s]",
-    "hr_shift_n": "HR shift [seg]",
-    "valid_basic": "valid",
-    "speed_spike": "spike",
-})
+c1, c2 = st.columns(2)
 
-st.dataframe(big_table, use_container_width=True, height=520)
+with c1:
+    st.markdown(f"### Без CS (speed=v_flat_eq) — {hr_label}")
+    st.markdown(f"**Схема A (paired) — {hr_label}**")
+    st.dataframe(build_zone_table(seg_no_cs, speed_col="v_flat_eq", scheme="A", hr_col=hr_col_used), use_container_width=True)
+    st.markdown(f"**Схема B (count-sorted) — {hr_label}**")
+    st.dataframe(build_zone_table(seg_no_cs, speed_col="v_flat_eq", scheme="B", hr_col=hr_col_used), use_container_width=True)
 
-# ---------------------------------------------------------
-# ЗОНИ – 4 таблици + ЯСНО дали HR е lag-нат + debug ред
-# ---------------------------------------------------------
-st.subheader("Зони: сравнение на 2 HR-схеми (A: paired | B: count-sorted)")
+with c2:
+    st.markdown(f"### С CS (speed=v_flat_eq_cs) — {hr_label}")
+    st.markdown(f"**Схема A (paired) — {hr_label}**")
+    st.dataframe(build_zone_table(seg_with_cs, speed_col="v_flat_eq_cs", scheme="A", hr_col=hr_col_used), use_container_width=True)
+    st.markdown(f"**Схема B (count-sorted) — {hr_label}**")
+    st.dataframe(build_zone_table(seg_with_cs, speed_col="v_flat_eq_cs", scheme="B", hr_col=hr_col_used), use_container_width=True)
 
-# ---- HR debug label (показва ясно дали е lag или не) ----
-if hr_col_used == "hr_aligned":
-    hr_label = f"HR_lagged (+{hr_lag_s}s)"
-else:
-    hr_label = "HR_raw (без lag)"
-
-# без CS: zonning по v_flat_eq
-seg_zones = assign_speed_zones(seg_slope.copy(), V_crit, speed_col="v_flat_eq")
-
-# с CS: zonning по v_flat_eq_cs
-seg_zones_cs = assign_speed_zones(seg_slope_cs.copy(), V_crit, speed_col="v_flat_eq_cs")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.markdown("## Без CS (speed = v_flat_eq)")
-    st.markdown(f"### Схема A (paired) — {hr_label}")
-    st.dataframe(
-        build_zone_speed_hr_table(seg_zones, "v_flat_eq", "A", hr_col_used, activity=None),
-        use_container_width=True
-    )
-    st.markdown(f"### Схема B (count-sorted) — {hr_label}")
-    st.dataframe(
-        build_zone_speed_hr_table(seg_zones, "v_flat_eq", "B", hr_col_used, activity=None),
-        use_container_width=True
-    )
-
-with col2:
-    st.markdown("## С CS (speed = v_flat_eq_cs)")
-    st.markdown(f"### Схема A (paired) — {hr_label}")
-    st.dataframe(
-        build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "A", hr_col_used, activity=None),
-        use_container_width=True
-    )
-    st.markdown(f"### Схема B (count-sorted) — {hr_label}")
-    st.dataframe(
-        build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "B", hr_col_used, activity=None),
-        use_container_width=True
-    )
-
-# ---- HR lag debug info (за да няма чудене) ----
+# Debug lag
 dt_est_dbg = estimate_seg_dt_seconds(seg_slope_cs)
 shift_n_dbg = int(round(hr_lag_s / max(dt_est_dbg, 1e-6)))
+st.caption(f"DEBUG: HR колона={hr_col_used} | lag={hr_lag_s}s | dt≈{dt_est_dbg:.2f}s | shift_n={shift_n_dbg} сегмента")
 
-st.caption(
-    f"DEBUG: HR колона = {hr_col_used} | "
-    f"lag = {hr_lag_s} s | "
-    f"dt ≈ {dt_est_dbg:.2f} s | "
-    f"shift_n = {shift_n_dbg} сегмента"
-)
 # ---------------------------------------------------------
-# NEW: ГЛОБАЛНИ V = f(HR) по всички активности + индекс на умора за избрана
+# Select activity
 # ---------------------------------------------------------
-st.subheader("V = f(HR) (глобално от всички активности) + индекс на умора (отклонение за активност)")
+st.subheader("Избор на активност (за графики/индекс)")
+act_list = sorted(seg_slope_cs["activity"].unique())
+act_selected = st.selectbox("Избери активност:", act_list)
 
-hr_for_models = hr_col_used               # hr_aligned (lag) или hr_mean (raw) според sidebar
-speed_for_models = "v_flat_eq_cs"         # тройно модулирана скорост
+g_act = seg_slope_cs[seg_slope_cs["activity"] == act_selected].copy()
+
+# ---------------------------------------------------------
+# Global V=f(HR) models from ALL activities
+# ---------------------------------------------------------
+st.subheader("Глобални V=f(HR) модели (от всички активности) + индекс на умора за избраната")
 
 deg = st.selectbox("Степен на регресията V=f(HR)", [1, 2], index=0)
 
-# 1) Глобални точки по зони от всички активности
-zp_global_B = global_zone_points_all_activities(
-    seg_all=seg_slope_cs,
-    assign_speed_zones_fn=assign_speed_zones,
-    V_crit=V_crit,
-    speed_col=speed_for_models,
-    hr_col=hr_for_models,
-    mode="B"  # count-sorted
-)
+# Build pooled zone points over ALL activities (CS speed)
+rows_B = []
+rows_A = []
+for act, g in seg_slope_cs.groupby("activity"):
+    g_local = g.copy()
+    g_local_z = assign_speed_zones(g_local, V_crit, speed_col="v_flat_eq_cs").dropna(subset=["zone"]).copy()
+    if g_local_z.empty:
+        continue
 
-zp_global_A = global_zone_points_all_activities(
-    seg_all=seg_slope_cs,
-    assign_speed_zones_fn=assign_speed_zones,
-    V_crit=V_crit,
-    speed_col=speed_for_models,
-    hr_col=hr_for_models,
-    mode="A"  # paired
-)
+    zpB = zone_points_count_sorted(seg_df=g_local, seg_zones=g_local_z, speed_col="v_flat_eq_cs", hr_col=hr_col_used)
+    zpB["activity"] = act
+    rows_B.append(zpB)
 
-colg1, colg2 = st.columns(2)
-with colg1:
-    st.markdown("### Глобални точки — Модел 1 (count-sorted HR, всички активности)")
-    st.dataframe(zp_global_B, use_container_width=True, height=280)
-with colg2:
-    st.markdown("### Глобални точки — Модел 2 (paired HR, всички активности)")
-    st.dataframe(zp_global_A, use_container_width=True, height=280)
+    zpA = zone_points_paired(seg_zones=g_local_z, speed_col="v_flat_eq_cs", hr_col=hr_col_used)
+    zpA["activity"] = act
+    rows_A.append(zpA)
 
-# 2) Фит на глобалните регресии
+zp_global_B = pd.concat(rows_B, ignore_index=True) if rows_B else pd.DataFrame(columns=["zone", "mean_speed", "mean_hr", "n", "activity"])
+zp_global_A = pd.concat(rows_A, ignore_index=True) if rows_A else pd.DataFrame(columns=["zone", "mean_speed", "mean_hr", "n", "activity"])
+
+colp1, colp2 = st.columns(2)
+with colp1:
+    st.markdown("### Pooled точки — Модел 1 (count-sorted)")
+    st.dataframe(zp_global_B, use_container_width=True, height=260)
+with colp2:
+    st.markdown("### Pooled точки — Модел 2 (paired)")
+    st.dataframe(zp_global_A, use_container_width=True, height=260)
+
 poly_B, dfB_fit = fit_v_of_hr_global(zp_global_B, deg=deg)
 poly_A, dfA_fit = fit_v_of_hr_global(zp_global_A, deg=deg)
 
 if poly_B is None or poly_A is None:
-    st.warning("Няма достатъчно pooled точки (всички активности) за регресия. Увеличи броя TCX или намали степента (deg=1).")
+    st.warning("Недостатъчно pooled точки за регресия. Добави още активности или ползвай deg=1.")
 else:
-    st.markdown("### Уравнения на глобалните регресии")
+    st.markdown("### Уравнения")
     st.write(f"Глобален Модел 1 (count-sorted):  V = {poly_B}")
     st.write(f"Глобален Модел 2 (paired):       V = {poly_A}")
 
-    # 3) Индекс на умора за избраната активност спрямо глобалния модел
-    g_act = seg_slope_cs[seg_slope_cs["activity"] == act_selected].copy()
     if g_act.empty:
         st.info("Няма сегменти за избраната активност.")
     else:
-        fi_B = fatigue_index_series(
-            seg_df=g_act,
-            poly=poly_B,
-            speed_real_col=speed_for_models,
-            hr_input_col=hr_for_models,
-        )
-        fi_A = fatigue_index_series(
-            seg_df=g_act,
-            poly=poly_A,
-            speed_real_col=speed_for_models,
-            hr_input_col=hr_for_models,
-        )
+        # Индекс на умора за избраната активност спрямо глобалните модели
+        fi_B = fatigue_index_series(g_act, poly_B, speed_real_col="v_flat_eq_cs", hr_input_col=hr_col_used)
+        fi_A = fatigue_index_series(g_act, poly_A, speed_real_col="v_flat_eq_cs", hr_input_col=hr_col_used)
 
-        st.markdown("### Динамика на индекса на умора (отклонение спрямо глобалния модел)")
-
-        df_plot_fi = pd.concat([
-            fi_B.assign(model="Global_Model1_count_sorted"),
-            fi_A.assign(model="Global_Model2_paired")
+        st.markdown("### Индекс на умора (2 глобални модела) – динамика по време")
+        df_plot = pd.concat([
+            fi_B.assign(model="Global_count_sorted"),
+            fi_A.assign(model="Global_paired"),
         ], ignore_index=True)
 
-        chart_fi = alt.Chart(df_plot_fi).mark_line().encode(
+        chart_fi = alt.Chart(df_plot).mark_line().encode(
             x=alt.X("time_s:Q", title="Време [s]"),
             y=alt.Y("fatigue_index:Q", title="Индекс на умора (km/h) = 2*V_real - V_pred"),
-            color=alt.Color("model:N", title="Глобален модел"),
+            color=alt.Color("model:N", title="Модел"),
             tooltip=["time_s:Q", "model:N", "fatigue_index:Q", "v_real:Q", "v_pred:Q", "delta_v:Q", "hr_used:Q"]
         )
         st.altair_chart(chart_fi, use_container_width=True)
 
-        # 4) Scatter pooled точки + линии (за прозрачност)
-        st.markdown("### Scatter (всички активности): V_flat_eq_cs vs HR_used + линии на регресиите")
-
+        # Scatter pooled + lines
+        st.markdown("### Scatter (всички активности) + линии на глобалните регресии")
         hr_min = float(np.nanmin(pd.concat([dfB_fit["mean_hr"], dfA_fit["mean_hr"]], ignore_index=True)))
         hr_max = float(np.nanmax(pd.concat([dfB_fit["mean_hr"], dfA_fit["mean_hr"]], ignore_index=True)))
         hr_grid = np.linspace(hr_min, hr_max, 250)
 
-        df_line_B = pd.DataFrame({"hr": hr_grid, "v": poly_B(hr_grid), "model": "Global_Model1_count_sorted"})
-        df_line_A = pd.DataFrame({"hr": hr_grid, "v": poly_A(hr_grid), "model": "Global_Model2_paired"})
+        df_line_B = pd.DataFrame({"hr": hr_grid, "v": poly_B(hr_grid), "model": "Global_count_sorted"})
+        df_line_A = pd.DataFrame({"hr": hr_grid, "v": poly_A(hr_grid), "model": "Global_paired"})
 
-        pts_B = dfB_fit.rename(columns={"mean_hr": "hr", "mean_speed": "v"}).assign(model="Global_Model1_count_sorted")
-        pts_A = dfA_fit.rename(columns={"mean_hr": "hr", "mean_speed": "v"}).assign(model="Global_Model2_paired")
+        pts_B = dfB_fit.rename(columns={"mean_hr": "hr", "mean_speed": "v"}).assign(model="Global_count_sorted")
+        pts_A = dfA_fit.rename(columns={"mean_hr": "hr", "mean_speed": "v"}).assign(model="Global_paired")
 
         scatter = alt.Chart(pd.concat([pts_B, pts_A], ignore_index=True)).mark_circle(size=45).encode(
-            x=alt.X("hr:Q", title=f"HR използван ({hr_for_models})"),
+            x=alt.X("hr:Q", title=f"HR използван ({hr_col_used})"),
             y=alt.Y("v:Q", title="V по зони (v_flat_eq_cs) [km/h]"),
             color=alt.Color("model:N", title="Модел"),
-            tooltip=["model:N", "hr:Q", "v:Q", "activity:N", "zone:N", "n:Q"]
+            tooltip=["model:N", "activity:N", "zone:N", "hr:Q", "v:Q", "n:Q"]
         )
 
         lines = alt.Chart(pd.concat([df_line_B, df_line_A], ignore_index=True)).mark_line().encode(
             x="hr:Q", y="v:Q", color="model:N"
         )
-
         st.altair_chart(scatter + lines, use_container_width=True)
 
-        # 5) Export
-        st.markdown("### Експорт на индекс на умора (2 глобални модела)")
-        fi_export = df_plot_fi[["activity", "time_s", "seg_idx", "model", "hr_used", "v_real", "v_pred", "delta_v", "fatigue_index"]].copy()
+        # Export
+        st.markdown("### Експорт (fatigue index)")
         st.download_button(
-            "Свали fatigue index като CSV",
-            data=fi_export.to_csv(index=False).encode("utf-8"),
-            file_name=f"fatigue_index_global_{act_selected}.csv".replace(" ", "_"),
-            mime="text/csv"
-        )
-
-
-    # Модел 2: paired HR (Схема A) + mean speed по speed-зоните
-    zp_A = zone_points_paired(
-        seg_zones=g_act_z,
-        speed_col=speed_for_models,
-        hr_col=hr_for_models,
-    )
-
-    colm1, colm2 = st.columns(2)
-    with colm1:
-        st.markdown("### Точки по зони — Модел 1 (count-sorted HR)")
-        st.dataframe(zp_B, use_container_width=True)
-    with colm2:
-        st.markdown("### Точки по зони — Модел 2 (paired HR)")
-        st.dataframe(zp_A, use_container_width=True)
-
-    # ---- Фит на V=f(HR) ----
-    deg = st.selectbox("Степен на регресията V=f(HR)", [1, 2], index=0)
-    poly_B, zpB_fit = fit_v_of_hr(zp_B, deg=deg)
-    poly_A, zpA_fit = fit_v_of_hr(zp_A, deg=deg)
-
-    if poly_B is None or poly_A is None:
-        st.warning("Няма достатъчно точки по зони за регресия (трябват поне deg+1 валидни зони).")
-    else:
-        st.markdown("### Уравнения на регресиите")
-        st.write(f"Модел 1 (count-sorted):  V = {poly_B}")
-        st.write(f"Модел 2 (paired):       V = {poly_A}")
-
-        # ---- Индекс на умора (по сегменти) ----
-        # HR за индекса: искаш „изместения 40 sec пулс“ → това е hr_aligned,
-        # но ако си избрал raw, ще работи с hr_mean.
-        fi_B = fatigue_index_series(
-            seg_df=g_act,
-            poly=poly_B,
-            speed_real_col=speed_for_models,
-            hr_input_col=hr_for_models,
-        )
-        fi_A = fatigue_index_series(
-            seg_df=g_act,
-            poly=poly_A,
-            speed_real_col=speed_for_models,
-            hr_input_col=hr_for_models,
-        )
-
-        # ---- Графики: fatigue_index(t) ----
-        import altair as alt
-
-        st.markdown("### Динамика на индекса на умора (2 модела)")
-        df_plot_fi = pd.concat([
-            fi_B.assign(model="Model1_count_sorted"),
-            fi_A.assign(model="Model2_paired")
-        ], ignore_index=True)
-
-        chart_fi = alt.Chart(df_plot_fi).mark_line().encode(
-            x=alt.X("time_s:Q", title="Време [s]"),
-            y=alt.Y("fatigue_index:Q", title="Индекс на умора (km/h)"),
-            color=alt.Color("model:N", title="Модел"),
-            tooltip=["time_s:Q", "model:N", "fatigue_index:Q", "v_real:Q", "v_pred:Q", "delta_v:Q", "hr_used:Q"]
-        )
-        st.altair_chart(chart_fi, use_container_width=True)
-
-        # ---- Допълнително: scatter HR vs V + регресионни линии ----
-        st.markdown("### Scatter: V_flat_eq_cs vs HR_used + регресии")
-        hr_min = float(np.nanmin(pd.concat([zpB_fit["mean_hr"], zpA_fit["mean_hr"]], ignore_index=True)))
-        hr_max = float(np.nanmax(pd.concat([zpB_fit["mean_hr"], zpA_fit["mean_hr"]], ignore_index=True)))
-        hr_grid = np.linspace(hr_min, hr_max, 200)
-
-        df_line_B = pd.DataFrame({"hr": hr_grid, "v": poly_B(hr_grid), "model": "Model1_count_sorted"})
-        df_line_A = pd.DataFrame({"hr": hr_grid, "v": poly_A(hr_grid), "model": "Model2_paired"})
-
-        df_pts_B = zpB_fit.rename(columns={"mean_hr": "hr", "mean_speed": "v"}).assign(model="Model1_count_sorted")
-        df_pts_A = zpA_fit.rename(columns={"mean_hr": "hr", "mean_speed": "v"}).assign(model="Model2_paired")
-
-        scatter = alt.Chart(pd.concat([df_pts_B, df_pts_A], ignore_index=True)).mark_circle(size=70).encode(
-            x=alt.X("hr:Q", title=f"HR използван ({hr_for_models})"),
-            y=alt.Y("v:Q", title="V по зони (v_flat_eq_cs) [km/h]"),
-            color=alt.Color("model:N", title="Модел"),
-            tooltip=["model:N", "hr:Q", "v:Q"]
-        )
-
-        lines = alt.Chart(pd.concat([df_line_B, df_line_A], ignore_index=True)).mark_line().encode(
-            x="hr:Q", y="v:Q", color="model:N"
-        )
-
-        st.altair_chart(scatter + lines, use_container_width=True)
-
-        # ---- Експорт на FI series ----
-        st.markdown("### Експорт на индекс на умора")
-        fi_export = df_plot_fi[["activity", "time_s", "seg_idx", "model", "hr_used", "v_real", "v_pred", "delta_v", "fatigue_index"]].copy()
-        st.download_button(
-            "Свали fatigue index като CSV",
-            data=fi_export.to_csv(index=False).encode("utf-8"),
+            "Свали fatigue index CSV",
+            data=df_plot.to_csv(index=False).encode("utf-8"),
             file_name=f"fatigue_index_{act_selected}.csv".replace(" ", "_"),
             mime="text/csv"
         )
-
-
-# ---------------------------------------------------------
-# ЗОНИ по избрана активност (A vs B)
-# ---------------------------------------------------------
-st.subheader("Зони по избрана активност (A vs B)")
-
-act_zone = st.selectbox(
-    "Избери активност за зонен анализ:",
-    act_list,
-    key="zone_act_select"
-)
-
-col3, col4 = st.columns(2)
-with col3:
-    st.markdown("### Без CS (speed = v_flat_eq)")
-    st.markdown(f"**Схема A — {hr_label}:**")
-    st.dataframe(
-        build_zone_speed_hr_table(seg_zones, "v_flat_eq", "A", hr_col_used, activity=act_zone),
-        use_container_width=True
-    )
-    st.markdown(f"**Схема B — {hr_label}:**")
-    st.dataframe(
-        build_zone_speed_hr_table(seg_zones, "v_flat_eq", "B", hr_col_used, activity=act_zone),
-        use_container_width=True
-    )
-
-with col4:
-    st.markdown("### С CS (speed = v_flat_eq_cs)")
-    st.markdown(f"**Схема A — {hr_label}:**")
-    st.dataframe(
-        build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "A", hr_col_used, activity=act_zone),
-        use_container_width=True
-    )
-    st.markdown(f"**Схема B — {hr_label}:**")
-    st.dataframe(
-        build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "B", hr_col_used, activity=act_zone),
-        use_container_width=True
-    )
-
-st.caption(
-    "Интерпретация: A(paired) = HR от сегментите в реалната speed-зона; "
-    "B(count-sorted) = HR се разпределя по рангове според броя сегменти във всяка speed-зона."
-)
