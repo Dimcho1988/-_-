@@ -967,9 +967,15 @@ big_table = big_table.rename(columns={
 st.dataframe(big_table, use_container_width=True, height=520)
 
 # ---------------------------------------------------------
-# ЗОНИ – 4 таблици (както преди)
+# ЗОНИ – 4 таблици + ЯСНО дали HR е lag-нат + debug ред
 # ---------------------------------------------------------
 st.subheader("Зони: сравнение на 2 HR-схеми (A: paired | B: count-sorted)")
+
+# ---- HR debug label (показва ясно дали е lag или не) ----
+if hr_col_used == "hr_aligned":
+    hr_label = f"HR_lagged (+{hr_lag_s}s)"
+else:
+    hr_label = "HR_raw (без lag)"
 
 # без CS: zonning по v_flat_eq
 seg_zones = assign_speed_zones(seg_slope.copy(), V_crit, speed_col="v_flat_eq")
@@ -981,48 +987,80 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("## Без CS (speed = v_flat_eq)")
-    st.markdown("### Схема A (paired):")
-    st.dataframe(build_zone_speed_hr_table(seg_zones, "v_flat_eq", "A", hr_col_used, activity=None), use_container_width=True)
-    st.markdown("### Схема B (count-sorted):")
-    st.dataframe(build_zone_speed_hr_table(seg_zones, "v_flat_eq", "B", hr_col_used, activity=None), use_container_width=True)
+    st.markdown(f"### Схема A (paired) — {hr_label}")
+    st.dataframe(
+        build_zone_speed_hr_table(seg_zones, "v_flat_eq", "A", hr_col_used, activity=None),
+        use_container_width=True
+    )
+    st.markdown(f"### Схема B (count-sorted) — {hr_label}")
+    st.dataframe(
+        build_zone_speed_hr_table(seg_zones, "v_flat_eq", "B", hr_col_used, activity=None),
+        use_container_width=True
+    )
 
 with col2:
     st.markdown("## С CS (speed = v_flat_eq_cs)")
-    st.markdown("### Схема A (paired):")
-    st.dataframe(build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "A", hr_col_used, activity=None), use_container_width=True)
-    st.markdown("### Схема B (count-sorted):")
-    st.dataframe(build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "B", hr_col_used, activity=None), use_container_width=True)
+    st.markdown(f"### Схема A (paired) — {hr_label}")
+    st.dataframe(
+        build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "A", hr_col_used, activity=None),
+        use_container_width=True
+    )
+    st.markdown(f"### Схема B (count-sorted) — {hr_label}")
+    st.dataframe(
+        build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "B", hr_col_used, activity=None),
+        use_container_width=True
+    )
 
+# ---- HR lag debug info (за да няма чудене) ----
+dt_est_dbg = estimate_seg_dt_seconds(seg_slope_cs)
+shift_n_dbg = int(round(hr_lag_s / max(dt_est_dbg, 1e-6)))
+
+st.caption(
+    f"DEBUG: HR колона = {hr_col_used} | "
+    f"lag = {hr_lag_s} s | "
+    f"dt ≈ {dt_est_dbg:.2f} s | "
+    f"shift_n = {shift_n_dbg} сегмента"
+)
+
+# ---------------------------------------------------------
+# ЗОНИ по избрана активност (A vs B)
+# ---------------------------------------------------------
 st.subheader("Зони по избрана активност (A vs B)")
 
-act_zone = st.selectbox("Избери активност за зонен анализ:", act_list, key="zone_act_select")
+act_zone = st.selectbox(
+    "Избери активност за зонен анализ:",
+    act_list,
+    key="zone_act_select"
+)
 
 col3, col4 = st.columns(2)
 with col3:
-    st.markdown("### Без CS")
-    st.markdown("**Схема A:**")
-    st.dataframe(build_zone_speed_hr_table(seg_zones, "v_flat_eq", "A", hr_col_used, activity=act_zone), use_container_width=True)
-    st.markdown("**Схема B:**")
-    st.dataframe(build_zone_speed_hr_table(seg_zones, "v_flat_eq", "B", hr_col_used, activity=act_zone), use_container_width=True)
+    st.markdown("### Без CS (speed = v_flat_eq)")
+    st.markdown(f"**Схема A — {hr_label}:**")
+    st.dataframe(
+        build_zone_speed_hr_table(seg_zones, "v_flat_eq", "A", hr_col_used, activity=act_zone),
+        use_container_width=True
+    )
+    st.markdown(f"**Схема B — {hr_label}:**")
+    st.dataframe(
+        build_zone_speed_hr_table(seg_zones, "v_flat_eq", "B", hr_col_used, activity=act_zone),
+        use_container_width=True
+    )
 
 with col4:
-    st.markdown("### С CS")
-    st.markdown("**Схема A:**")
-    st.dataframe(build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "A", hr_col_used, activity=act_zone), use_container_width=True)
-    st.markdown("**Схема B:**")
-    st.dataframe(build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "B", hr_col_used, activity=act_zone), use_container_width=True)
+    st.markdown("### С CS (speed = v_flat_eq_cs)")
+    st.markdown(f"**Схема A — {hr_label}:**")
+    st.dataframe(
+        build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "A", hr_col_used, activity=act_zone),
+        use_container_width=True
+    )
+    st.markdown(f"**Схема B — {hr_label}:**")
+    st.dataframe(
+        build_zone_speed_hr_table(seg_zones_cs, "v_flat_eq_cs", "B", hr_col_used, activity=act_zone),
+        use_container_width=True
+    )
 
-# ---------------------------------------------------------
-# ЕКСПОРТ
-# ---------------------------------------------------------
-st.subheader("Експорт на сегментите (след glide+slope+CS + HR lag)")
-
-export_df = seg_slope_cs[cols_big].copy()
-csv_data = export_df.to_csv(index=False).encode("utf-8")
-
-st.download_button(
-    label="Свали сегментите като CSV",
-    data=csv_data,
-    file_name="segments_glide_slope_cs_hrlag.csv",
-    mime="text/csv"
+st.caption(
+    "Интерпретация: A(paired) = HR от сегментите в реалната speed-зона; "
+    "B(count-sorted) = HR се разпределя по рангове според броя сегменти във всяка speed-зона."
 )
