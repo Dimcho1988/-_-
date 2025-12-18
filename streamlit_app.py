@@ -13,12 +13,8 @@ from cs_modulator import (
     predict_t90_for_reference,
 )
 
-from fatigue_model import (
-    zone_points_paired,
-    zone_points_count_sorted,
-    fit_v_of_hr_global,
-    fatigue_index_series,
-)
+from fatigue_model import zone_points_paired, zone_points_count_sorted, fit_v_of_hr_global, fatigue_index_series
+
 
 # ---------------------------------------------------------
 # SETTINGS
