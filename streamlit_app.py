@@ -17,8 +17,9 @@ from fatigue_model import (
     zone_points_count_sorted,
     fit_v_of_hr,
     fatigue_index_series,
+    global_zone_points_all_activities,
+    fit_v_of_hr_global,
 )
-
 
 # ---------------------------------------------------------
 # НАСТРОЙКИ
