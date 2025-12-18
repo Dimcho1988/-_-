@@ -1030,35 +1030,122 @@ st.caption(
     f"shift_n = {shift_n_dbg} сегмента"
 )
 # ---------------------------------------------------------
-# NEW: V = f(HR) по зони + индекс на умора (2 модела)
+# NEW: ГЛОБАЛНИ V = f(HR) по всички активности + индекс на умора за избрана
 # ---------------------------------------------------------
-st.subheader("V = f(HR) модели по зони + индекс на умора (2 регресии)")
+st.subheader("V = f(HR) (глобално от всички активности) + индекс на умора (отклонение за активност)")
 
-# Избираме HR за регресиите:
-#  - За 'paired' ще използваме hr_aligned (ако си избрал lagged) или hr_mean (ако си избрал raw)
-hr_for_models = hr_col_used
+hr_for_models = hr_col_used               # hr_aligned (lag) или hr_mean (raw) според sidebar
+speed_for_models = "v_flat_eq_cs"         # тройно модулирана скорост
 
-# Скорост за регресия и индекс – тройно модулираната
-speed_for_models = "v_flat_eq_cs"
+deg = st.selectbox("Степен на регресията V=f(HR)", [1, 2], index=0)
 
-# 1) Създаваме зоните по speed_for_models (за избраната активност)
-g_act = seg_slope_cs[seg_slope_cs["activity"] == act_selected].copy()
+# 1) Глобални точки по зони от всички активности
+zp_global_B = global_zone_points_all_activities(
+    seg_all=seg_slope_cs,
+    assign_speed_zones_fn=assign_speed_zones,
+    V_crit=V_crit,
+    speed_col=speed_for_models,
+    hr_col=hr_for_models,
+    mode="B"  # count-sorted
+)
 
-# ако activity е празна – излизаме
-if g_act.empty:
-    st.info("Няма сегменти за избраната активност.")
+zp_global_A = global_zone_points_all_activities(
+    seg_all=seg_slope_cs,
+    assign_speed_zones_fn=assign_speed_zones,
+    V_crit=V_crit,
+    speed_col=speed_for_models,
+    hr_col=hr_for_models,
+    mode="A"  # paired
+)
+
+colg1, colg2 = st.columns(2)
+with colg1:
+    st.markdown("### Глобални точки — Модел 1 (count-sorted HR, всички активности)")
+    st.dataframe(zp_global_B, use_container_width=True, height=280)
+with colg2:
+    st.markdown("### Глобални точки — Модел 2 (paired HR, всички активности)")
+    st.dataframe(zp_global_A, use_container_width=True, height=280)
+
+# 2) Фит на глобалните регресии
+poly_B, dfB_fit = fit_v_of_hr_global(zp_global_B, deg=deg)
+poly_A, dfA_fit = fit_v_of_hr_global(zp_global_A, deg=deg)
+
+if poly_B is None or poly_A is None:
+    st.warning("Няма достатъчно pooled точки (всички активности) за регресия. Увеличи броя TCX или намали степента (deg=1).")
 else:
-    # зоните вече ги имаш като функция assign_speed_zones – тук я ползваме
-    g_act_z = assign_speed_zones(g_act, V_crit, speed_col=speed_for_models)
+    st.markdown("### Уравнения на глобалните регресии")
+    st.write(f"Глобален Модел 1 (count-sorted):  V = {poly_B}")
+    st.write(f"Глобален Модел 2 (paired):       V = {poly_A}")
 
-    # ---- Точки по зони за двата модела ----
-    # Модел 1: count-sorted HR (Схема B) + mean speed по speed-зоните
-    zp_B = zone_points_count_sorted(
-        seg_df=g_act,
-        seg_zones=g_act_z,
-        speed_col=speed_for_models,
-        hr_col=hr_for_models,
-    )
+    # 3) Индекс на умора за избраната активност спрямо глобалния модел
+    g_act = seg_slope_cs[seg_slope_cs["activity"] == act_selected].copy()
+    if g_act.empty:
+        st.info("Няма сегменти за избраната активност.")
+    else:
+        fi_B = fatigue_index_series(
+            seg_df=g_act,
+            poly=poly_B,
+            speed_real_col=speed_for_models,
+            hr_input_col=hr_for_models,
+        )
+        fi_A = fatigue_index_series(
+            seg_df=g_act,
+            poly=poly_A,
+            speed_real_col=speed_for_models,
+            hr_input_col=hr_for_models,
+        )
+
+        st.markdown("### Динамика на индекса на умора (отклонение спрямо глобалния модел)")
+
+        df_plot_fi = pd.concat([
+            fi_B.assign(model="Global_Model1_count_sorted"),
+            fi_A.assign(model="Global_Model2_paired")
+        ], ignore_index=True)
+
+        chart_fi = alt.Chart(df_plot_fi).mark_line().encode(
+            x=alt.X("time_s:Q", title="Време [s]"),
+            y=alt.Y("fatigue_index:Q", title="Индекс на умора (km/h) = 2*V_real - V_pred"),
+            color=alt.Color("model:N", title="Глобален модел"),
+            tooltip=["time_s:Q", "model:N", "fatigue_index:Q", "v_real:Q", "v_pred:Q", "delta_v:Q", "hr_used:Q"]
+        )
+        st.altair_chart(chart_fi, use_container_width=True)
+
+        # 4) Scatter pooled точки + линии (за прозрачност)
+        st.markdown("### Scatter (всички активности): V_flat_eq_cs vs HR_used + линии на регресиите")
+
+        hr_min = float(np.nanmin(pd.concat([dfB_fit["mean_hr"], dfA_fit["mean_hr"]], ignore_index=True)))
+        hr_max = float(np.nanmax(pd.concat([dfB_fit["mean_hr"], dfA_fit["mean_hr"]], ignore_index=True)))
+        hr_grid = np.linspace(hr_min, hr_max, 250)
+
+        df_line_B = pd.DataFrame({"hr": hr_grid, "v": poly_B(hr_grid), "model": "Global_Model1_count_sorted"})
+        df_line_A = pd.DataFrame({"hr": hr_grid, "v": poly_A(hr_grid), "model": "Global_Model2_paired"})
+
+        pts_B = dfB_fit.rename(columns={"mean_hr": "hr", "mean_speed": "v"}).assign(model="Global_Model1_count_sorted")
+        pts_A = dfA_fit.rename(columns={"mean_hr": "hr", "mean_speed": "v"}).assign(model="Global_Model2_paired")
+
+        scatter = alt.Chart(pd.concat([pts_B, pts_A], ignore_index=True)).mark_circle(size=45).encode(
+            x=alt.X("hr:Q", title=f"HR използван ({hr_for_models})"),
+            y=alt.Y("v:Q", title="V по зони (v_flat_eq_cs) [km/h]"),
+            color=alt.Color("model:N", title="Модел"),
+            tooltip=["model:N", "hr:Q", "v:Q", "activity:N", "zone:N", "n:Q"]
+        )
+
+        lines = alt.Chart(pd.concat([df_line_B, df_line_A], ignore_index=True)).mark_line().encode(
+            x="hr:Q", y="v:Q", color="model:N"
+        )
+
+        st.altair_chart(scatter + lines, use_container_width=True)
+
+        # 5) Export
+        st.markdown("### Експорт на индекс на умора (2 глобални модела)")
+        fi_export = df_plot_fi[["activity", "time_s", "seg_idx", "model", "hr_used", "v_real", "v_pred", "delta_v", "fatigue_index"]].copy()
+        st.download_button(
+            "Свали fatigue index като CSV",
+            data=fi_export.to_csv(index=False).encode("utf-8"),
+            file_name=f"fatigue_index_global_{act_selected}.csv".replace(" ", "_"),
+            mime="text/csv"
+        )
+
 
     # Модел 2: paired HR (Схема A) + mean speed по speed-зоните
     zp_A = zone_points_paired(
