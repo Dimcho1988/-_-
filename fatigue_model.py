@@ -130,13 +130,26 @@ def fatigue_index_series(
     poly_v_of_hr: np.poly1d,
     speed_real_col: str = "v_flat_eq_cs",
     hr_input_col: str = "hr_aligned",
+    cs_value: float | None = None,
 ) -> pd.DataFrame:
+    """
+    Индекс на умора по логиката:
+
+        V_real  = реална скорост от speed_real_col (напр. v_flat_eq_cs)
+        V_pred  = poly_v_of_hr(HR_aligned)
+        ΔV      = V_real - V_pred
+        FI      = CS + ΔV
+
+    Ако cs_value е None, връщаме само ΔV (в този случай FI = ΔV).
+    """
+
     if seg_df is None or seg_df.empty or poly_v_of_hr is None:
         return pd.DataFrame()
 
     df = seg_df.copy()
     df = _ensure_cols(df, ["time_s", speed_real_col, hr_input_col, "dt_s"])
 
+    # Ако няма time_s, построяваме го от dt_s (кумулативно време)
     if df["time_s"].isna().all():
         dt = df["dt_s"].fillna(0.0).to_numpy()
         df["time_s"] = np.cumsum(dt) - dt
@@ -144,12 +157,20 @@ def fatigue_index_series(
     hr = df[hr_input_col].to_numpy(dtype=float)
     v_real = df[speed_real_col].to_numpy(dtype=float)
 
+    # Предсказана скорост от глобалния V=f(HR) модел
     v_pred = np.full_like(v_real, np.nan)
-    mask = ~np.isnan(hr)
-    v_pred[mask] = poly_v_of_hr(hr[mask])
+    mask = np.isfinite(hr) & np.isfinite(v_real)
+    if np.any(mask):
+        v_pred[mask] = poly_v_of_hr(hr[mask])
 
+    # Разлика реално - предсказано
     delta_v = v_real - v_pred
-    fatigue_index = 2.0 * v_real - v_pred
+
+    # Приравняване към обща скала чрез CS
+    if cs_value is None:
+        fatigue_index = delta_v
+    else:
+        fatigue_index = cs_value + delta_v
 
     return pd.DataFrame(
         {
