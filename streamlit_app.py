@@ -280,6 +280,10 @@ def apply_basic_filters(segments):
     seg = seg.groupby("activity", group_keys=False).apply(mark_speed_spikes)
     seg["speed_spike"] = seg["speed_spike"].fillna(False)
     seg.loc[seg["speed_spike"], "valid_basic"] = False
+
+    # допълнителен базов филтър: сегменти със скорост < 2 km/h (спирания) не влизат в моделите
+    seg.loc[seg["v_kmh"] < 2.0, "valid_basic"] = False
+
     return seg
 
 
@@ -527,6 +531,17 @@ V_crit = st.sidebar.number_input("Критична скорост V_crit [km/h]"
 DAMP_GLIDE = st.sidebar.slider("Омекотяване на плъзгаемостта α", min_value=0.0, max_value=1.0, value=1.0, step=0.05)
 
 st.sidebar.markdown("---")
+st.sidebar.header("Корекция на скоростта от TCX")
+speed_scale = st.sidebar.slider(
+    "Коефициент за корекция на скоростта",
+    min_value=0.80,
+    max_value=1.20,
+    value=1.00,
+    step=0.01,
+    help="Ако Garmin показва по-ниска средна скорост от тази тук, избери коефициент < 1.0 (напр. 0.95)."
+)
+
+st.sidebar.markdown("---")
 st.sidebar.header("HR синхронизация (lag)")
 hr_lag_s = st.sidebar.slider("HR lag [s] (speed изпреварва пулса)", min_value=0, max_value=120, value=40, step=1)
 hr_col_used = st.sidebar.selectbox("Кой пулс да се ползва за модели/таблици?", ["hr_aligned", "hr_mean"], index=0)
@@ -577,6 +592,10 @@ segments = pd.concat(seg_list, ignore_index=True) if seg_list else pd.DataFrame(
 if segments.empty:
     st.error("Не успях да създам сегменти.")
     st.stop()
+
+# запазваме суровата скорост и прилагаме корекцията от TCX коефициента
+segments["v_kmh_raw"] = segments["v_kmh"]
+segments["v_kmh"] = segments["v_kmh_raw"] * speed_scale
 
 segments_f = apply_basic_filters(segments)
 
@@ -649,12 +668,29 @@ for act, g in seg_slope.groupby("activity"):
 
 seg_slope_cs = pd.concat(cs_rows, ignore_index=True)
 
+# сегментите с реална скорост < 2 km/h ги махаме от крайната модулирана скорост (NaN)
+seg_slope_cs.loc[seg_slope_cs["v_kmh"] < 2.0, "v_flat_eq_cs"] = np.nan
+
 # Re-add aligned HR to CS DF (keeps same alignment)
 seg_slope_cs["hr_aligned"] = seg_slope_cs["hr_aligned"]
 
 # CS diagnostics
 dv_ref, tau_ref_now, t90_now = predict_t90_for_reference(CS, ref_percent, tau_min, k_par, q_par)
 st.caption(f"CS модел: Δv_ref={dv_ref:.2f} km/h, τ_ref≈{tau_ref_now:.1f} s, t90≈{t90_now:.0f} s при {ref_percent:.1f}% от CS.")
+
+with st.expander("ℹ️ Обяснение на CS модела и нормализиране на скоростта"):
+    st.markdown(
+        """
+**CS моделът** описва как се натрупва „кислороден дълг“ при скорости над критичната скорост (CS).  
+Нормализираната скорост `v_flat_eq_cs` отчита:
+- плъзгаемостта (глайд),
+- наклона,
+- и ефекта на метаболитното натоварване спрямо CS.
+
+По този начин скоростите от различни трасета и дни стават сравними на една и съща физиологична скала.
+        """
+    )
+
 st.subheader("Обобщение по активности (средни скорости + среден пулс)")
 
 # какъв пулс да обобщаваме (същия, който ползваш за моделите/таблиците)
@@ -672,7 +708,7 @@ else:
     if "speed_spike" in df_sum.columns:
         df_sum = df_sum[~df_sum["speed_spike"].fillna(False)].copy()
 
-    # по избор: филтър за спирания (примерно под 2 km/h)
+    # по избор: филтър за спирания (примерно под 2 km/h) – за визуализация/summary
     min_speed_summary = st.slider("Филтър за обобщение: минимална реална скорост [km/h]", 0.0, 5.0, 0.0, 0.5)
     if min_speed_summary > 0:
         df_sum = df_sum[df_sum["v_kmh"] >= min_speed_summary].copy()
@@ -870,8 +906,20 @@ else:
         st.info("Няма сегменти за избраната активност.")
     else:
         # Индекс на умора за избраната активност спрямо глобалните модели
-        fi_B = fatigue_index_series(g_act, poly_B, speed_real_col="v_flat_eq_cs", hr_input_col=hr_col_used)
-        fi_A = fatigue_index_series(g_act, poly_A, speed_real_col="v_flat_eq_cs", hr_input_col=hr_col_used)
+        fi_B = fatigue_index_series(
+            g_act,
+            poly_B,
+            speed_real_col="v_flat_eq_cs",
+            hr_input_col=hr_col_used,
+            cs_value=CS,
+        )
+        fi_A = fatigue_index_series(
+            g_act,
+            poly_A,
+            speed_real_col="v_flat_eq_cs",
+            hr_input_col=hr_col_used,
+            cs_value=CS,
+        )
 
         st.markdown("### Индекс на умора (2 глобални модела) – динамика по време")
         df_plot = pd.concat([
@@ -881,11 +929,33 @@ else:
 
         chart_fi = alt.Chart(df_plot).mark_line().encode(
             x=alt.X("time_s:Q", title="Време [s]"),
-            y=alt.Y("fatigue_index:Q", title="Индекс на умора (km/h) = 2*V_real - V_pred"),
+            y=alt.Y(
+                "fatigue_index:Q",
+                title="Индекс на умора (km/h) = CS + (V_real - V_pred)",
+            ),
             color=alt.Color("model:N", title="Модел"),
             tooltip=["time_s:Q", "model:N", "fatigue_index:Q", "v_real:Q", "v_pred:Q", "delta_v:Q", "hr_used:Q"]
         )
         st.altair_chart(chart_fi, use_container_width=True)
+
+        with st.expander("ℹ️ Обяснение на индекса на умора"):
+            st.markdown(
+                """
+Индексът на умора тук се дефинира като:
+
+\\[
+FI = CS + (V_{real} - V_{pred})
+\\]
+
+- `V_real` е реалната нормализирана скорост (`v_flat_eq_cs`) за сегмента.
+- `V_pred` е скоростта, която глобалният модел V=f(HR) „очаква“ при същия HR.
+- Ако `V_real = V_pred`, тогава `FI = CS`.
+- Ако `V_real > V_pred` → бегачът/скиорът е по-свеж и ефективен → FI > CS.
+- Ако `V_real < V_pred` → има повече умора/неефективност → FI < CS.
+
+Тъй като FI е в km/h и е „закован“ около CS, можем да сравняваме умората между различни дни и трасета.
+                """
+            )
 
         # Scatter pooled + lines
         st.markdown("### Scatter (всички активности) + линии на глобалните регресии")
