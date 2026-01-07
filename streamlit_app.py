@@ -237,20 +237,43 @@ def build_segments(df_activity, activity_label):
         t1 = times[end_idx]
         dt = (t1 - t0) / np.timedelta64(1, "s")
 
-        d0 = dists[start_idx]
-        d1 = dists[end_idx]
-        elev0 = elevs[start_idx]
-        elev1 = elevs[end_idx]
+        # сегментни масиви
+        idx_slice = slice(start_idx, end_idx + 1)
+        dist_seg = dists[idx_slice].astype(float)
+        elev_seg = elevs[idx_slice].astype(float)
+
+        # защитa от NaN и немонотонни дистанции
+        mask_valid = (~np.isnan(dist_seg)) & (~np.isnan(elev_seg))
+        dist_seg = dist_seg[mask_valid]
+        elev_seg = elev_seg[mask_valid]
+
+        if dist_seg.size < 2:
+            start_idx = end_idx
+            continue
+
+        # гарантираме не-намаляваща дистанция
+        dist_seg = np.maximum.accumulate(dist_seg)
+
+        d0 = dist_seg[0]
+        d1 = dist_seg[-1]
         d_m = max(0.0, d1 - d0)
 
         if dt < MIN_T_SEG or d_m < MIN_D_SEG:
             start_idx = end_idx
             continue
 
-        if elev0 is None or elev1 is None or np.isnan(elev0) or np.isnan(elev1):
-            slope = np.nan
+        # центриране и линейна регресия elev ~ dist
+        x = dist_seg - d0
+        y = elev_seg - elev_seg[0]
+
+        if x[-1] - x[0] > 0:
+            try:
+                coef = np.polyfit(x, y, 1)[0]  # m в y = m*x + b
+                slope = coef * 100.0          # в %
+            except Exception:
+                slope = np.nan
         else:
-            slope = (elev1 - elev0) / d_m * 100.0 if d_m > 0 else np.nan
+            slope = np.nan
 
         v_kmh = (d_m / dt) * 3.6
         hr_mean = float(np.nanmean(hrs[start_idx:end_idx + 1]))
