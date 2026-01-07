@@ -90,6 +90,26 @@ def estimate_seg_dt_seconds(seg_df: pd.DataFrame) -> float:
     return float(np.median(v))
 
 
+def smooth_series(values: np.ndarray,
+                  win_med: int = 5,
+                  win_mean: int = 11) -> np.ndarray:
+    """
+    Изглаждане на шумни данни (например надморска височина или дистанция):
+
+    1) Медианен филтър (rolling median) за премахване на единични "игли".
+    2) Подвижно средно (rolling mean) за real smoothing.
+
+    win_med  ~ 3–7 (секунди)
+    win_mean ~ 9–15 (секунди)
+    """
+    s = pd.Series(values, dtype="float64")
+    # 1) медиана за иглите
+    s_med = s.rolling(window=win_med, center=True, min_periods=1).median()
+    # 2) подвижно средно за изглаждане
+    s_smooth = s_med.rolling(window=win_mean, center=True, min_periods=1).mean()
+    return s_smooth.to_numpy()
+
+
 def clean_speed_for_cs(g, v_max_cs=50.0):
     v = g["v_flat_eq"].to_numpy(dtype=float)
     v = np.clip(v, 0.0, v_max_cs)
@@ -191,8 +211,9 @@ def build_segments(df_activity, activity_label):
     df_activity = df_activity.sort_values("time").reset_index(drop=True)
 
     times = df_activity["time"].to_numpy()
-    elevs = df_activity["elev"].to_numpy()
-    dists = df_activity["dist"].to_numpy()
+    # ако имаме сгладени колони, ги ползваме
+    elevs = df_activity["elev_smooth"].to_numpy() if "elev_smooth" in df_activity.columns else df_activity["elev"].to_numpy()
+    dists = df_activity["dist_smooth"].to_numpy() if "dist_smooth" in df_activity.columns else df_activity["dist"].to_numpy()
     hrs = df_activity["hr"].to_numpy()
 
     n = len(df_activity)
@@ -580,6 +601,24 @@ if not all_points:
     st.stop()
 
 points = pd.concat(all_points, ignore_index=True)
+
+# Изглаждане на надморска височина и дистанция преди сегментиране
+points_smooth_list = []
+for act, g in points.groupby("activity"):
+    g = g.sort_values("time").reset_index(drop=True).copy()
+
+    # изглаждаме надморската, ако я има
+    if g["elev"].notna().any():
+        g["elev_smooth"] = smooth_series(g["elev"].to_numpy())
+    else:
+        g["elev_smooth"] = g["elev"]
+
+    # изглаждаме и дистанцията
+    g["dist_smooth"] = smooth_series(g["dist"].ffill().to_numpy())
+
+    points_smooth_list.append(g)
+
+points = pd.concat(points_smooth_list, ignore_index=True)
 
 # Segment
 seg_list = []
